@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use cpal::traits::{DeviceTrait, HostTrait};
-use lofty::file::TaggedFileExt;
+use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use rodio::{Decoder, OutputStream, Sink};
@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
+use std::time::Duration;
 use tauri::State;
 
 #[derive(Serialize)]
@@ -16,6 +17,7 @@ pub struct TrackMetadata {
     title: Option<String>,
     artist: Option<String>,
     cover: Option<String>,
+    duration: Option<f64>,
 }
 
 #[tauri::command]
@@ -25,10 +27,12 @@ fn get_track_metadata(path: String) -> Result<TrackMetadata, String> {
         .read()
         .map_err(|e| format!("No se pudo leer metadatos: {e}"))?;
 
+    let duration = Some(tagged_file.properties().duration().as_secs_f64());
+
     let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
 
     let Some(tag) = tag else {
-        return Ok(TrackMetadata { title: None, artist: None, cover: None });
+        return Ok(TrackMetadata { title: None, artist: None, cover: None, duration });
     };
 
     let title = tag.title().map(|s| s.to_string());
@@ -42,7 +46,7 @@ fn get_track_metadata(path: String) -> Result<TrackMetadata, String> {
         format!("data:{mime};base64,{encoded}")
     });
 
-    Ok(TrackMetadata { title, artist, cover })
+    Ok(TrackMetadata { title, artist, cover, duration })
 }
 
 enum AudioCommand {
@@ -50,6 +54,8 @@ enum AudioCommand {
     Pause,
     Resume,
     Stop,
+    Position(Sender<f64>),
+    Seek(f64, Sender<Result<(), String>>),
 }
 
 pub struct AudioPlayer {
@@ -108,6 +114,19 @@ impl AudioPlayer {
                             s.stop();
                         }
                     }
+                    AudioCommand::Position(reply) => {
+                        let pos = sink.as_ref().map(|s| s.get_pos().as_secs_f64()).unwrap_or(0.0);
+                        let _ = reply.send(pos);
+                    }
+                    AudioCommand::Seek(seconds, reply) => {
+                        let result = match &sink {
+                            Some(s) => s
+                                .try_seek(Duration::from_secs_f64(seconds.max(0.0)))
+                                .map_err(|e| e.to_string()),
+                            None => Ok(()),
+                        };
+                        let _ = reply.send(result);
+                    }
                 }
             }
         });
@@ -142,6 +161,20 @@ fn stop_audio(state: State<AudioPlayer>) -> Result<(), String> {
     state.send(AudioCommand::Stop)
 }
 
+#[tauri::command]
+fn get_playback_position(state: State<AudioPlayer>) -> Result<f64, String> {
+    let (reply_tx, reply_rx) = channel();
+    state.send(AudioCommand::Position(reply_tx))?;
+    reply_rx.recv().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn seek_audio(seconds: f64, state: State<AudioPlayer>) -> Result<(), String> {
+    let (reply_tx, reply_rx) = channel();
+    state.send(AudioCommand::Seek(seconds, reply_tx))?;
+    reply_rx.recv().map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -154,6 +187,8 @@ pub fn run() {
             pause_audio,
             resume_audio,
             stop_audio,
+            get_playback_position,
+            seek_audio,
             get_track_metadata
         ])
         .run(tauri::generate_context!())

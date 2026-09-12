@@ -8,18 +8,55 @@ import {
   SkipBack,
   SkipForward,
   Shuffle,
+  Repeat,
+  Repeat1,
   ListMusic,
   ArrowUp,
   ArrowDown,
+  PictureInPicture2,
   X,
 } from "lucide-vue-next";
+import { Window } from "@tauri-apps/api/window";
 import { usePlayerStore } from "../stores/player";
 
 const player = usePlayerStore();
-const { activePlaylist, currentTrack, currentCover, accentColor, isPlaying, isShuffle, error } =
-  storeToRefs(player);
+const {
+  activePlaylist,
+  currentTrack,
+  currentCover,
+  accentColor,
+  isPlaying,
+  isShuffle,
+  repeatMode,
+  position,
+  duration,
+  error,
+} = storeToRefs(player);
 
 const showQueue = ref(false);
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function onSeek(event: Event) {
+  const value = Number((event.target as HTMLInputElement).value);
+  void player.seekTo(value);
+}
+
+async function toggleMiniPlayer() {
+  const mini = await Window.getByLabel("mini");
+  if (!mini) return;
+  if (await mini.isVisible()) {
+    await mini.hide();
+  } else {
+    await mini.show();
+    await mini.setFocus();
+  }
+}
 
 const barStyle = computed(() => {
   if (!accentColor.value) return {};
@@ -31,7 +68,7 @@ const barStyle = computed(() => {
 
 <template>
   <footer
-    class="relative flex h-20 shrink-0 items-center justify-between border-t border-white/5 bg-neutral-950/80 px-6 transition-[background] duration-700"
+    class="relative flex h-24 shrink-0 items-center justify-between border-t border-white/5 bg-neutral-950/80 px-6 transition-[background] duration-700"
     :style="barStyle"
   >
     <!-- Queue panel -->
@@ -118,53 +155,88 @@ const barStyle = computed(() => {
     </div>
 
     <!-- Transport controls -->
-    <div class="flex items-center gap-5">
-      <button
-        @click="player.toggleShuffle"
-        :class="isShuffle ? 'text-emerald-400' : 'text-neutral-400 hover:text-neutral-100'"
-      >
-        <Shuffle :size="18" />
-      </button>
+    <div class="flex w-[420px] flex-col items-center gap-1.5 py-2">
+      <div class="flex items-center gap-5">
+        <button
+          @click="player.toggleShuffle"
+          :class="isShuffle ? 'text-emerald-400' : 'text-neutral-400 hover:text-neutral-100'"
+        >
+          <Shuffle :size="18" />
+        </button>
 
-      <button
-        :disabled="!activePlaylist?.tracks.length"
-        @click="player.playPrevious"
-        class="text-neutral-300 hover:text-neutral-100 disabled:opacity-30"
-      >
-        <SkipBack :size="20" :fill="'currentColor'" />
-      </button>
+        <button
+          :disabled="!activePlaylist?.tracks.length"
+          @click="player.playPrevious"
+          class="text-neutral-300 hover:text-neutral-100 disabled:opacity-30"
+        >
+          <SkipBack :size="20" :fill="'currentColor'" />
+        </button>
 
-      <button
-        v-if="currentTrack"
-        @click="isPlaying ? player.pause() : player.resume()"
-        class="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black transition hover:scale-105"
-      >
-        <Pause v-if="isPlaying" :size="18" :fill="'currentColor'" />
-        <Play v-else :size="18" :fill="'currentColor'" class="ml-0.5" />
-      </button>
+        <button
+          v-if="currentTrack"
+          @click="isPlaying ? player.pause() : player.resume()"
+          class="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black transition hover:scale-105"
+        >
+          <Pause v-if="isPlaying" :size="18" :fill="'currentColor'" />
+          <Play v-else :size="18" :fill="'currentColor'" class="ml-0.5" />
+        </button>
 
-      <button
-        :disabled="!activePlaylist?.tracks.length"
-        @click="player.playNext"
-        class="text-neutral-300 hover:text-neutral-100 disabled:opacity-30"
-      >
-        <SkipForward :size="20" :fill="'currentColor'" />
-      </button>
+        <button
+          :disabled="!activePlaylist?.tracks.length"
+          @click="player.playNext"
+          class="text-neutral-300 hover:text-neutral-100 disabled:opacity-30"
+        >
+          <SkipForward :size="20" :fill="'currentColor'" />
+        </button>
 
-      <button
-        v-if="currentTrack"
-        @click="player.stop"
-        class="text-neutral-400 hover:text-neutral-100"
-      >
-        <Square :size="16" />
-      </button>
+        <button
+          v-if="currentTrack"
+          @click="player.stop"
+          class="text-neutral-400 hover:text-neutral-100"
+        >
+          <Square :size="16" />
+        </button>
 
-      <button
-        @click="showQueue = !showQueue"
-        :class="showQueue ? 'text-emerald-400' : 'text-neutral-400 hover:text-neutral-100'"
-      >
-        <ListMusic :size="18" />
-      </button>
+        <button
+          title="Repetir"
+          @click="player.cycleRepeatMode"
+          :class="repeatMode !== 'off' ? 'text-emerald-400' : 'text-neutral-400 hover:text-neutral-100'"
+        >
+          <Repeat1 v-if="repeatMode === 'one'" :size="18" />
+          <Repeat v-else :size="18" />
+        </button>
+
+        <button
+          @click="showQueue = !showQueue"
+          :class="showQueue ? 'text-emerald-400' : 'text-neutral-400 hover:text-neutral-100'"
+        >
+          <ListMusic :size="18" />
+        </button>
+
+        <button
+          title="Mini reproductor"
+          @click="toggleMiniPlayer"
+          class="text-neutral-400 hover:text-neutral-100"
+        >
+          <PictureInPicture2 :size="18" />
+        </button>
+      </div>
+
+      <div class="flex w-full items-center gap-2">
+        <span class="w-9 shrink-0 text-right text-[10px] tabular-nums text-neutral-500">{{ formatTime(position) }}</span>
+        <input
+          type="range"
+          min="0"
+          :max="duration || 0"
+          step="0.1"
+          :value="position"
+          :disabled="!currentTrack"
+          @input="onSeek"
+          class="h-1 w-full cursor-pointer appearance-none rounded-full bg-neutral-700 disabled:cursor-default"
+          :style="{ accentColor: accentColor || '#34d399' }"
+        />
+        <span class="w-9 shrink-0 text-[10px] tabular-nums text-neutral-500">{{ formatTime(duration) }}</span>
+      </div>
     </div>
 
     <div class="w-72"></div>

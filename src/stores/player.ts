@@ -1,8 +1,19 @@
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { FastAverageColor } from "fast-average-color";
+
+export interface MiniPlayerState {
+  trackName: string;
+  artist: string;
+  cover: string;
+  isPlaying: boolean;
+  accentColor: string | null;
+}
+
+export type RepeatMode = "off" | "all" | "one";
 
 export interface Track {
   id: string;
@@ -11,12 +22,14 @@ export interface Track {
   artist?: string;
   /** Data URL (data:image/...;base64,...). Empty string means "checked, no cover". */
   cover?: string;
+  duration?: number;
 }
 
 interface TrackMetadata {
   title: string | null;
   artist: string | null;
   cover: string | null;
+  duration: number | null;
 }
 
 export interface Playlist {
@@ -32,12 +45,17 @@ interface PlayerState {
   isPlaying: boolean;
   isLoading: boolean;
   isShuffle: boolean;
+  repeatMode: RepeatMode;
   accentColor: string | null;
   error: string | null;
+  position: number;
+  duration: number;
 }
 
 const LIBRARY_PLAYLIST_ID = "library";
+const REPEAT_MODES: RepeatMode[] = ["off", "all", "one"];
 let store: Store | null = null;
+let progressTimer: ReturnType<typeof setInterval> | null = null;
 const fac = new FastAverageColor();
 
 function fileNameFromPath(path: string) {
@@ -56,8 +74,11 @@ export const usePlayerStore = defineStore("player", {
     isPlaying: false,
     isLoading: false,
     isShuffle: false,
+    repeatMode: "off",
     accentColor: null,
     error: null,
+    position: 0,
+    duration: 0,
   }),
 
   getters: {
@@ -74,6 +95,21 @@ export const usePlayerStore = defineStore("player", {
   },
 
   actions: {
+    broadcastState() {
+      const state: MiniPlayerState = {
+        trackName: this.currentTrack?.name ?? "Nada reproduciéndose",
+        artist: this.currentTrack?.artist ?? "",
+        cover: this.currentCover ?? "",
+        isPlaying: this.isPlaying,
+        accentColor: this.accentColor,
+      };
+      void emit("player-state", state);
+    },
+
+    broadcastProgress() {
+      void emit("player-progress", { position: this.position, duration: this.duration });
+    },
+
     async init() {
       store = await load("library.json", { autoSave: true });
       const saved = await store.get<Playlist[]>("playlists");
@@ -158,8 +194,12 @@ export const usePlayerStore = defineStore("player", {
         await invoke("play_audio", { path: track.path });
         this.currentTrack = track;
         this.isPlaying = true;
+        this.position = 0;
+        this.duration = track.duration ?? 0;
+        this.broadcastState();
+        this.startProgressTracking();
 
-        if (track.cover === undefined) {
+        if (track.cover === undefined || track.duration === undefined) {
           void this.loadTrackMetadata(track);
         } else {
           void this.updateAccentColor();
@@ -178,14 +218,74 @@ export const usePlayerStore = defineStore("player", {
         track.cover = meta.cover ?? "";
         if (meta.title) track.name = meta.title;
         if (meta.artist) track.artist = meta.artist;
+        track.duration = meta.duration ?? 0;
+        if (this.currentTrack?.id === track.id) {
+          this.duration = track.duration;
+        }
         void this.persist();
       } catch {
         track.cover = "";
+        track.duration = 0;
       } finally {
         if (this.currentTrack?.id === track.id) {
           void this.updateAccentColor();
         }
       }
+    },
+
+    startProgressTracking() {
+      this.stopProgressTracking();
+      progressTimer = setInterval(async () => {
+        if (!this.currentTrack || !this.isPlaying) return;
+        try {
+          this.position = await invoke<number>("get_playback_position");
+        } catch {
+          return;
+        }
+        this.broadcastProgress();
+        if (this.duration > 0 && this.position >= this.duration - 0.25) {
+          this.stopProgressTracking();
+          await this.handleTrackEnded();
+        }
+      }, 500);
+    },
+
+    stopProgressTracking() {
+      if (progressTimer) {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+    },
+
+    async seekTo(seconds: number) {
+      if (!this.currentTrack) return;
+      const target = Math.max(0, Math.min(seconds, this.duration || seconds));
+      await invoke("seek_audio", { seconds: target });
+      this.position = target;
+    },
+
+    cycleRepeatMode() {
+      const idx = REPEAT_MODES.indexOf(this.repeatMode);
+      this.repeatMode = REPEAT_MODES[(idx + 1) % REPEAT_MODES.length];
+    },
+
+    async handleTrackEnded() {
+      if (!this.currentTrack) return;
+
+      if (this.repeatMode === "one") {
+        await this.playTrack(this.currentTrack);
+        return;
+      }
+
+      const tracks = this.activePlaylist?.tracks ?? [];
+      const isLastTrack = !this.isShuffle && this.currentIndex === tracks.length - 1;
+
+      if (this.repeatMode === "off" && isLastTrack) {
+        await this.stop();
+        return;
+      }
+
+      await this.playNext();
     },
 
     async updateAccentColor() {
@@ -199,17 +299,23 @@ export const usePlayerStore = defineStore("player", {
         this.accentColor = result.hex;
       } catch {
         this.accentColor = null;
+      } finally {
+        this.broadcastState();
       }
     },
 
     async pause() {
       await invoke("pause_audio");
       this.isPlaying = false;
+      this.stopProgressTracking();
+      this.broadcastState();
     },
 
     async resume() {
       await invoke("resume_audio");
       this.isPlaying = true;
+      this.startProgressTracking();
+      this.broadcastState();
     },
 
     async stop() {
@@ -217,6 +323,10 @@ export const usePlayerStore = defineStore("player", {
       this.isPlaying = false;
       this.currentTrack = null;
       this.accentColor = null;
+      this.position = 0;
+      this.duration = 0;
+      this.stopProgressTracking();
+      this.broadcastState();
     },
 
     toggleShuffle() {
